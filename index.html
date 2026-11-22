@@ -249,6 +249,7 @@ textarea{resize:vertical;min-height:200px;font-size:13px;line-height:1.55}
 .dot.ok{background:var(--ok)}.dot.busy,.dot.dirty,.dot.conflict{background:var(--warn)}.dot.err{background:var(--bad)}
 button{-webkit-tap-highlight-color:transparent}
 @media (display-mode:standalone){body{overscroll-behavior-y:contain}}
+.chip .no{background:var(--accent);color:var(--on-accent);border-radius:999px;padding:0 6px;font-weight:700;font-size:11px;font-variant-numeric:tabular-nums}
 .credit{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:12px;text-align:center}
 .mpanel.wide{max-width:700px}
 
@@ -298,7 +299,7 @@ var val=function(id){var e=$(id);return e?e.value:''};
 var mk=function(iso,po,sh){return iso+'|'+po+'|'+sh};
 
 var dates=[],S=null,A=null;
-var ui={tab:'roster',view:'week',day:0,modal:null,swap:null,q:'',sel:{},selMode:false};
+var ui={showNo:false,tab:'roster',view:'week',day:0,modal:null,swap:null,q:'',sel:{},selMode:false};
 
 function buildDates(){
   var t=new Date();dates=[];
@@ -348,12 +349,24 @@ function normalize(){
 function prune(){return archivePast()}
 
 /* ---------- Quy tắc & kiểm tra ---------- */
+/* Ngày gác bắt đầu từ ca đầu tiên trong danh sách. Ca nào bắt đầu sớm hơn ca đứng trước nó
+   (ví dụ 00:00 sau 22:00) là đã qua nửa đêm, tính sang ngày lịch kế tiếp. */
+function shiftOffset(shId){
+  var d=0,prev=null;
+  for(var i=0;i<S.shifts.length;i++){
+    var a=S.shifts[i].start.split(':').map(Number),st=a[0]*60+a[1];
+    if(prev!==null&&st<prev)d+=1440;
+    prev=st;
+    if(S.shifts[i].id===shId)return d;
+  }
+  return 0;
+}
 function interval(iso,shId){
   var sh=shift(shId);if(!sh)return null;
   var a=sh.start.split(':').map(Number),b=sh.end.split(':').map(Number);
   var sm=a[0]*60+a[1],em=b[0]*60+b[1];
   var dur=((em-sm)+1440)%1440;if(dur===0)dur=1440;
-  var s=utc(iso)+sm*60000;return {s:s,e:s+dur*60000,h:dur/60};
+  var s=utc(iso)+(sm+shiftOffset(shId))*60000;return {s:s,e:s+dur*60000,h:dur/60};
 }
 function onLeave(pid,iso){return S.leaves.some(function(l){return l.pid===pid&&l.from<=iso&&iso<=l.to})}
 function qRange(){
@@ -416,7 +429,7 @@ function shiftAt(ms){
 }
 function nextShifts(ms){
   var best=[],t=new Date();
-  for(var k=0;k<=2;k++){
+  for(var k=-1;k<=2;k++){
     var iso=isoOf(new Date(t.getFullYear(),t.getMonth(),t.getDate()+k));
     S.shifts.forEach(function(sh){
       var iv=interval(iso,sh.id);if(!iv||iv.s<=ms)return;
@@ -426,7 +439,7 @@ function nextShifts(ms){
   }
   return best;
 }
-function isNow(shId){return CUR.some(function(c){return c.sh.id===shId})}
+function isNow(shId,iso){return CUR.some(function(c){return c.sh.id===shId&&(iso?c.iso===iso:dates.some(function(d){return d.iso===c.iso}))})}
 function fmtMin(m){m=Math.max(0,Math.round(m));var h=Math.floor(m/60),r=m%60;return (h?h+' giờ ':'')+((r||!h)?r+' phút':'')}
 function nowSection(title,list,ms,future){
   return list.map(function(c){
@@ -551,8 +564,9 @@ function autoBalance(mode){
 function chip(pid,key,full){
   var p=person(pid);if(!p)return '';
   var bad=A.confSet[key+'|'+pid],sw=ui.swap&&ui.swap.key===key&&ui.swap.pid===pid;
+  var no=ui.showNo?'<small class="no">'+(p.type==='qncn'?'Q':'')+(circList(p.type==='qncn'?'q':'cs').indexOf(p)+1)+'</small>':'';
   return '<span class="chip'+(bad?' bad':'')+(sw?' sw':'')+'" data-act="chip" data-key="'+key+'" data-pid="'+pid+'" title="'+esc(p.name+(bad?' — '+bad.join(', '):''))+'">'+
-    esc(full?p.name:shortName(p.name))+(full&&p.rank?' <small>'+esc(p.rank)+'</small>':'')+(p.type==='qncn'?' <small class="qn">QNCN</small>':'')+'</span>';
+    no+esc(full?p.name:shortName(p.name))+(full&&p.rank?' <small>'+esc(p.rank)+'</small>':'')+(p.type==='qncn'?' <small class="qn">QNCN</small>':'')+'</span>';
 }
 function slotDiv(key,po,full){
   var shId=key.split('|')[2],f=slotFill(key,po,shId),arr=getSlot(key);
@@ -584,7 +598,7 @@ function dayView(){
   h+='</div><p class="tm" style="margin-bottom:10px">'+dayLabel(dates[ui.day].iso,true)+'</p>';
   var d=dates[ui.day];
   S.shifts.forEach(function(sh,si){
-    h+='<section class="dsec sh'+(si%4)+'"><h3>'+esc(sh.name)+'<span class="tm">'+sh.start+'–'+sh.end+'</span>'+(ui.day===0&&isNow(sh.id)?'<span class="tag ok">Đang gác</span>':'')+'</h3><div class="cards">';
+    h+='<section class="dsec sh'+(si%4)+'"><h3>'+esc(sh.name)+'<span class="tm">'+sh.start+'–'+sh.end+'</span>'+(isNow(sh.id,dates[ui.day].iso)?'<span class="tag ok">Đang gác</span>':'')+'</h3><div class="cards">';
     S.posts.forEach(function(po){h+='<div class="pcard sh'+(si%4)+'"><div class="ph-h">'+esc(po.name)+'</div>'+slotDiv(mk(d.iso,po.id,sh.id),po,true)+'</div>'});
     h+='</div></section>';
   });
@@ -606,7 +620,7 @@ function rosterView(){
   if(ui.swap){var sp=person(ui.swap.pid);h+='<div class="note swap"><p>Đang đổi chỗ cho <b>'+esc(sp?sp.name:'')+'</b>. Bấm vào tên một người để hoán đổi, hoặc bấm vào ô còn trống để chuyển sang.</p><button class="btn sm" data-act="swap-cancel">Huỷ</button></div>'}
   var miss=A.total-A.filled;
   h+='<div class="bar"><div class="seg" role="group" aria-label="Kiểu xem"><button data-act="view" data-v="week" aria-pressed="'+(ui.view==='week')+'">Cả tuần</button><button data-act="view" data-v="day" aria-pressed="'+(ui.view==='day')+'">Theo ngày</button></div><span class="grow"></span>'+
-    '<button class="btn" data-act="xlsx" data-mode="week">Xuất Excel</button><button class="btn" data-act="exchange">Đổi gác</button><button class="btn" data-act="copy">'+(ui.view==='week'?'Sao chép 7 ngày':'Sao chép ngày này')+'</button><button class="btn danger" data-act="ask-clear">Xoá bảng</button><button class="btn primary" data-act="auto">Tự động cắt gác</button></div>';
+    '<button class="btn" data-act="shown" aria-pressed="'+ui.showNo+'">'+(ui.showNo?'Ẩn số thứ tự':'Hiện số thứ tự')+'</button><button class="btn" data-act="xlsx" data-mode="week">Xuất Excel</button><button class="btn" data-act="exchange">Đổi gác</button><button class="btn" data-act="copy">'+(ui.view==='week'?'Sao chép 7 ngày':'Sao chép ngày này')+'</button><button class="btn danger" data-act="ask-clear">Xoá bảng</button><button class="btn primary" data-act="auto">Tự động cắt gác</button></div>';
   h+='<div class="pills"><span class="pill '+(miss?'warn':'ok')+'">Đã xếp <b>'+A.filled+'/'+A.total+'</b> vị trí</span>'+
     (miss?'<span class="pill warn">Thiếu <b>'+miss+'</b> người</span>':'')+
     '<span class="pill '+(A.conf.length?'bad':'ok')+'">'+(A.conf.length?'<b>'+A.conf.length+'</b> xung đột':'Không xung đột')+'</span></div>';
@@ -1290,6 +1304,7 @@ function act(a,el,e){
       ui.modal=null;commit('Đã lưu');break}
     case 'now':ui.modal={type:'now'};renderModal();break;
     case 'install':if(PWA.ev){PWA.ev.prompt();PWA.ev.userChoice.then(function(){PWA.ev=null;rerender()},function(){})}break;
+    case 'shown':ui.showNo=!ui.showNo;render();break;
     case 'sync':ui.modal={type:SYNC.conf?'conflict':'sync'};renderModal();break;
     case 'sync-login':syncLogin();break;
     case 'sync-out':if(SYNC.auth)SYNC.auth.signOut();ui.modal=null;renderModal();toast('Đã đăng xuất, dữ liệu vẫn còn trên máy này');break;
