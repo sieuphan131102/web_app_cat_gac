@@ -246,7 +246,7 @@ textarea{resize:vertical;min-height:200px;font-size:13px;line-height:1.55}
 .grid tr.band .tag{margin:0 0 0 6px}
 
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted)}
-.dot.ok{background:var(--ok)}.dot.busy{background:var(--warn)}.dot.err{background:var(--bad)}
+.dot.ok{background:var(--ok)}.dot.busy,.dot.dirty,.dot.conflict{background:var(--warn)}.dot.err{background:var(--bad)}
 button{-webkit-tap-highlight-color:transparent}
 @media (display-mode:standalone){body{overscroll-behavior-y:contain}}
 .credit{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:12px;text-align:center}
@@ -310,7 +310,7 @@ function dayLabel(iso,withYear){
   return DAYN[dow]+' '+dmy(iso)+(withYear?'/'+iso.slice(0,4):'');
 }
 function load(){try{var r=localStorage.getItem(LS);if(r){var o=JSON.parse(r);if(o&&o.people&&o.posts&&o.shifts)return o}}catch(e){}return null}
-function save(){S.updated=Date.now();try{localStorage.setItem(LS,JSON.stringify(S))}catch(e){}scheduleSync()}
+function save(){S.updated=Date.now();S.dirty=true;try{localStorage.setItem(LS,JSON.stringify(S))}catch(e){}scheduleSync()}
 
 var person=function(id){return S.people.find(function(p){return p.id===id})};
 var post=function(id){return S.posts.find(function(p){return p.id===id})};
@@ -335,17 +335,17 @@ function sample(){
   [[0,'Thiếu úy'],[3,'Trung úy'],[9,'Thượng úy'],[15,'Thiếu úy'],[17,'Trung úy']].forEach(function(x){var p=S.people[x[0]];p.type='qncn';p.rank=x[1];p.squad='Ban chỉ huy'});
   S.leaves.push({id:'l'+uid(),pid:S.people[4].id,from:dates[1].iso,to:dates[3].iso,reason:'Nghỉ phép năm'});
   S.leaves.push({id:'l'+uid(),pid:S.people[10].id,from:dates[4].iso,to:dates[6].iso,reason:'Việc gia đình'});
-  autoAssign('all');save();
+  autoAssign('all');S.updated=Date.now();S.dirty=false;saveLocal();
 }
 function normalize(){
-  S.settings=Object.assign({unit:'',minRest:8,maxPerDay:1,sample:false,qLimit:true,byOrder:true},S.settings||{});
+  S.settings=Object.assign({unit:'',minRest:8,maxPerDay:1,sample:false,qLimit:true,byOrder:true,rotMode:'circle'},S.settings||{});
   S.people.forEach(function(p){if(!p.type)p.type='cs'});
   S.posts.forEach(function(p){if(p.qn==null)p.qn=0});
   if(!S.settings.qFrom&&S.shifts[0])S.settings.qFrom=S.shifts[0].id;
   if(!S.settings.qTo&&S.shifts.length)S.settings.qTo=S.shifts[Math.min(7,S.shifts.length-1)].id;
   S.leaves=S.leaves||[];S.assign=S.assign||{};S.history=S.history||{};
 }
-function prune(){archivePast()}
+function prune(){return archivePast()}
 
 /* ---------- Quy tắc & kiểm tra ---------- */
 function interval(iso,shId){
@@ -474,7 +474,46 @@ function weekCount(pid){
 }
 
 /* ---------- Tự động cắt gác ---------- */
-function autoAssign(mode){
+/* ---------- Cắt gác vòng tròn ---------- */
+function circList(T){return S.people.filter(function(p){return (p.type==='qncn')===(T==='q')})}
+function nextInCircle(T){
+  var l=circList(T),n=l.length;if(!n)return null;
+  var st=l.findIndex(function(p){return S.rot&&p.id===S.rot[T]});
+  for(var k=1;k<=n;k++){var p=l[((st+k)%n+n)%n];if(p.active)return p}
+  return null;
+}
+function setRotStart(T,id){
+  var l=circList(T),n=l.length,i=l.findIndex(function(p){return p.id===id});
+  if(i<0||!n)return;S.rot=S.rot||{};S.rot[T]=l[(i-1+n)%n].id;
+}
+function autoAssign(mode){return S.settings.rotMode==='balance'?autoBalance(mode):autoCircle(mode)}
+function autoCircle(mode){
+  var win={};dates.forEach(function(d){win[d.iso]=1});
+  if(mode==='all')Object.keys(S.assign).forEach(function(k){if(win[k.split('|')[0]])delete S.assign[k]});
+  var last={cs:(S.rot&&S.rot.cs)||null,q:(S.rot&&S.rot.q)||null},lists={cs:circList('cs'),q:circList('q')},added=0;
+  dates.forEach(function(d){S.shifts.forEach(function(sh){S.posts.forEach(function(po){
+    var key=mk(d.iso,po.id,sh.id);if(!S.assign[key])S.assign[key]=[];var arr=S.assign[key];
+    arr.forEach(function(pid){var p=person(pid);if(p)last[p.type==='qncn'?'q':'cs']=pid});
+    var f=slotFill(key,po,sh.id);
+    [['q',f.mq],['cs',f.mcs]].forEach(function(x){
+      var T=x[0],left=x[1],list=lists[T],n=list.length;
+      while(left>0&&n){
+        var st=list.findIndex(function(p){return p.id===last[T]}),pick=null;
+        for(var k=1;k<=n;k++){
+          var p=list[((st+k)%n+n)%n];
+          if(!p.active||arr.indexOf(p.id)>=0)continue;
+          if(reasons(p.id,d.iso,sh.id,key).length)continue;
+          pick=p;break;
+        }
+        if(!pick)break;
+        arr.push(pick.id);last[T]=pick.id;added++;left--;
+      }
+    });
+  })})});
+  Object.keys(S.assign).forEach(function(k){if(!S.assign[k].length)delete S.assign[k]});
+  return added;
+}
+function autoBalance(mode){
   var win={};dates.forEach(function(d){win[d.iso]=1});
   if(mode==='all')Object.keys(S.assign).forEach(function(k){if(win[k.split('|')[0]])delete S.assign[k]});
   var act=S.people.filter(function(p){return p.active});
@@ -686,7 +725,7 @@ function configView(){
   h+='<div class="sec"><h2>Quy tắc cắt gác</h2><p class="sub">Dùng cho tự động cắt gác và cảnh báo xung đột.</p><div class="two" style="max-width:560px">'+
     '<div class="field"><label for="c-unit">Tên đơn vị</label><input type="text" id="c-unit" data-set="unit" value="'+esc(S.settings.unit)+'"></div>'+
     '<div class="field"><label for="c-rest">Nghỉ tối thiểu giữa hai ca (giờ)</label><input type="number" id="c-rest" data-set="minRest" min="0" max="24" value="'+esc(S.settings.minRest)+'"></div>'+
-    '<div class="field"><label for="c-max">Số ca tối đa mỗi người / ngày</label><input type="number" id="c-max" data-set="maxPerDay" min="1" max="5" value="'+esc(S.settings.maxPerDay)+'"></div></div><label class="chk" style="margin-top:4px"><input type="checkbox" data-set="byOrder"'+(S.settings.byOrder?' checked':'')+'> Ưu tiên theo thứ tự quân số khi cắt gác</label></div>';
+    '<div class="field"><label for="c-max">Số ca tối đa mỗi người / ngày</label><input type="number" id="c-max" data-set="maxPerDay" min="1" max="5" value="'+esc(S.settings.maxPerDay)+'"></div></div><div class="field" style="margin-top:4px;max-width:560px"><label for="c-rot">Cách xếp gác tự động</label><select id="c-rot" data-set="rotMode"><option value="circle"'+(S.settings.rotMode!=='balance'?' selected':'')+'>Vòng tròn theo thứ tự quân số</option><option value="balance"'+(S.settings.rotMode==='balance'?' selected':'')+'>Chia đều theo số ca đã gác</option></select><p class="tm">Vòng tròn: mỗi ca lấy người kế tiếp trong danh sách ở tab Quân số, hết danh sách thì quay lại đầu. Chiến sĩ và QNCN có vòng riêng. Vòng tiếp nối từ người gác cuối của ngày hôm qua. Người nghỉ phép hoặc chưa đủ giờ nghỉ được bỏ qua sang người kế tiếp.</p></div></div>';
   h+='<div class="sec"><h2>Quân nhân chuyên nghiệp (QNCN)</h2><p class="sub">Trong khoảng ca bên dưới, QNCN gác chung với chiến sĩ ở những vị trí có đặt "QNCN cùng gác" (sửa ở mục Vị trí gác). Ngoài khoảng này chỉ có chiến sĩ gác.</p><label class="chk"><input type="checkbox" data-set="qLimit"'+(S.settings.qLimit?' checked':'')+'> Giới hạn ca gác của QNCN</label><div class="two" style="max-width:560px;margin-top:8px"><div class="field"><label for="c-qf">Gác từ ca</label><select id="c-qf" data-set="qFrom"'+(S.settings.qLimit?'':' disabled')+'>'+shiftOpts(S.settings.qFrom)+'</select></div><div class="field"><label for="c-qt">Đến ca</label><select id="c-qt" data-set="qTo"'+(S.settings.qLimit?'':' disabled')+'>'+shiftOpts(S.settings.qTo)+'</select></div></div><p class="tm">'+esc(qText())+'</p></div>';
   h+=pwaSection();
   h+='<div class="sec"><h2>Dữ liệu</h2><p class="sub">Dữ liệu được lưu trong trình duyệt này.</p><div class="bar"><button class="btn" data-act="ask-sample">Nạp lại dữ liệu mẫu</button><button class="btn danger" data-act="ask-wipe">Xoá quân số và bảng gác</button></div></div>';
@@ -790,6 +829,7 @@ function modalHTML(){
   else if(m.type==='now')h=nowModal();
   else if(m.type==='hday')h=hdayModal(m.id);
   else if(m.type==='sync')h=syncModal();
+  else if(m.type==='conflict')h=conflictModal();
   else if(m.type==='person'){var p=m.id?person(m.id):{name:'',rank:'',squad:'',active:true,type:'cs'};
     h='<h2>'+(m.id?'Sửa thông tin':'Thêm người')+'</h2><p class="sub"></p>'+
       '<div class="lbl" style="margin-bottom:6px">Loại quân nhân</div><div class="opts" role="radiogroup" aria-label="Loại quân nhân">'+
@@ -808,8 +848,15 @@ function modalHTML(){
     h='<h2>'+(m.id?'Sửa ca gác':'Thêm ca gác')+'</h2><p class="sub"></p><div class="field"><label for="f-name">Tên ca</label><input type="text" id="f-name" value="'+esc(sh.name)+'"></div><div class="two"><div class="field"><label for="f-start">Bắt đầu</label><input type="time" id="f-start" value="'+sh.start+'"></div><div class="field"><label for="f-end">Kết thúc</label><input type="time" id="f-end" value="'+sh.end+'"></div></div><label class="chk"><input type="checkbox" id="f-night"'+(sh.night?' checked':'')+'> Ca đêm (được chia đều riêng)</label>'+
       '<div class="foot"><button class="btn" data-act="mclose">Huỷ</button><button class="btn primary" data-primary data-act="save-shift">Lưu</button></div>';}
   else if(m.type==='auto'){
-    h='<h2>Tự động cắt gác</h2><p class="sub">Xếp người cho 7 ngày từ hôm nay, chia đều số ca và ca đêm, tránh người nghỉ phép, giữ nghỉ tối thiểu '+esc(S.settings.minRest)+' giờ giữa hai ca và theo ca đã đặt cho QNCN.'+(S.settings.byOrder?' Khi ngang nhau, ưu tiên theo thứ tự quân số.':'')+'</p>'+
-      '<div class="mlist"><div class="mi"><div class="l"><b>Chỉ điền ô còn thiếu</b><div class="meta">Giữ nguyên những người đã xếp.</div></div><div class="acts"><button class="btn primary sm" data-act="run-auto" data-mode="fill">Điền thiếu</button></div></div>'+
+    var circ=S.settings.rotMode!=='balance';
+    var startSel=function(T,label){
+      var l=circList(T).filter(function(p){return p.active});if(!l.length)return '';
+      var nx=nextInCircle(T);
+      return '<div class="field"><label for="au-'+T+'">'+label+'</label><select id="au-'+T+'">'+l.map(function(p){return '<option value="'+p.id+'"'+(nx&&nx.id===p.id?' selected':'')+'>'+esc(p.name)+(p.rank?' ('+esc(p.rank)+')':'')+'</option>'}).join('')+'</select></div>';
+    };
+    h='<h2>Tự động cắt gác</h2><p class="sub">'+(circ?'Xếp vòng tròn theo thứ tự quân số: người kế tiếp trong danh sách gác ca tiếp theo, hết danh sách thì quay lại đầu. Chiến sĩ và QNCN có vòng riêng.':'Xếp chia đều số ca và ca đêm cho mọi người.')+' Luôn tránh người nghỉ phép và giữ nghỉ tối thiểu '+esc(S.settings.minRest)+' giờ giữa hai ca; người chưa đủ điều kiện được bỏ qua sang người kế tiếp.</p>'+
+      (circ?startSel('cs','Chiến sĩ bắt đầu từ')+startSel('q','QNCN bắt đầu từ'):'')+
+      '<div class="mlist"><div class="mi"><div class="l"><b>Chỉ điền ô còn thiếu</b><div class="meta">Giữ nguyên những người đã xếp, vòng tiếp nối từ họ.</div></div><div class="acts"><button class="btn primary sm" data-act="run-auto" data-mode="fill">Điền thiếu</button></div></div>'+
       '<div class="mi"><div class="l"><b>Xếp lại toàn bộ</b><div class="meta">Xoá bảng 7 ngày hiện tại rồi xếp mới.</div></div><div class="acts"><button class="btn sm" data-act="run-auto" data-mode="all">Xếp lại</button></div></div></div>'+
       '<div class="foot"><button class="btn" data-act="mclose">Đóng</button></div>';}
   else if(m.type==='text'){
@@ -833,6 +880,10 @@ function snapDay(iso){
 }
 function archivePast(){
   var today=dates[0].iso,days={},n=0;
+  var pk=Object.keys(S.assign).filter(function(k){return k.split('|')[0]<today&&S.assign[k].length}).map(function(k){
+    var p=k.split('|');return {k:k,o:p[0]+pad(Math.max(0,S.shifts.findIndex(function(x){return x.id===p[2]})))+pad(Math.max(0,S.posts.findIndex(function(x){return x.id===p[1]})))};
+  }).sort(function(a,b){return a.o<b.o?-1:a.o>b.o?1:0});
+  if(pk.length){var rot=Object.assign({},S.rot||{});pk.forEach(function(x){S.assign[x.k].forEach(function(pid){var pe=person(pid);if(pe)rot[pe.type==='qncn'?'q':'cs']=pid})});S.rot=rot}
   Object.keys(S.assign).forEach(function(k){var d=k.split('|')[0];if(d<today&&S.assign[k].length&&!S.history[d])days[d]=1});
   Object.keys(days).forEach(function(iso){S.history[iso]={rows:snapDay(iso).rows,saved:Date.now()};histSet(iso);n++});
   var y=new Date();y.setDate(y.getDate()-1);var lim=isoOf(y);
@@ -841,7 +892,7 @@ function archivePast(){
   return n;
 }
 function rollover(){
-  buildDates();ui.day=0;var n=archivePast();save();render();
+  buildDates();ui.day=0;var n=archivePast();if(n)save();else saveLocal();render();
   if(n)toast('Đã lưu lịch sử '+n+' ngày vào tab Lịch sử');
 }
 function credit(){
@@ -994,82 +1045,118 @@ function exportXlsx(mode,id){
 }
 
 /* ---------- Đồng bộ (Firebase) ---------- */
-/* Chỉ bật khi trang chạy độc lập và đã điền FB_CONFIG; ngoài ra dữ liệu chỉ lưu trong trình duyệt. */
-var SYNC={state:'off',user:null,auth:null,doc:null,hist:null,dev:uid()+uid(),timer:null,first:true,histFirst:true,remoteHist:{},u1:null,u2:null};
+/* Mở app: dùng dữ liệu trên máy, không đọc máy chủ. Chỉ gửi lên khi có thay đổi.
+   Muốn lấy thay đổi từ thiết bị khác: bấm "Tải dữ liệu mới nhất". Nếu hai máy cùng sửa, app hỏi giữ bản nào. */
+var DEVKEY='cat-gac-dev';
+function devId(){try{var v=localStorage.getItem(DEVKEY);if(!v){v=uid()+uid();localStorage.setItem(DEVKEY,v)}return v}catch(e){return uid()+uid()}}
+var SYNC={user:null,auth:null,db:null,doc:null,hist:null,dev:devId(),timer:null,busy:false,err:false,conf:null};
 var SKIPMODAL=false;
 function syncAvail(){return !!(window.FB_CONFIG&&window.FB_CONFIG.apiKey&&window.firebase)}
-function syncLabel(){return {off:'Chưa đăng nhập',out:'Chưa đăng nhập',busy:'Đang đồng bộ…',ok:'Đã đồng bộ',err:'Lỗi đồng bộ'}[SYNC.state]||''}
+function syncState(){
+  if(!SYNC.user)return 'out';
+  if(SYNC.conf)return 'conflict';
+  if(SYNC.busy)return 'busy';
+  if(SYNC.err)return 'err';
+  return S.dirty?'dirty':'ok';
+}
+function syncLabel(){return {out:'Chưa đăng nhập',ok:'Đã đồng bộ',dirty:'Chờ đồng bộ',busy:'Đang đồng bộ…',err:'Lỗi đồng bộ',conflict:'Cần chọn bản'}[syncState()]}
 function syncBtn(){
   if(!syncAvail())return '';
-  return '<button class="btn" id="syncpill" data-act="sync"><i class="dot '+SYNC.state+'"></i><span>'+syncLabel()+'</span></button>';
+  return '<button class="btn" id="syncpill" data-act="sync"><i class="dot '+syncState()+'"></i><span>'+syncLabel()+'</span></button>';
 }
-function syncPill(){var e=$('syncpill');if(e)e.innerHTML='<i class="dot '+SYNC.state+'"></i><span>'+syncLabel()+'</span>'}
+function syncPill(){var e=$('syncpill');if(e)e.innerHTML='<i class="dot '+syncState()+'"></i><span>'+syncLabel()+'</span>'}
 function rerender(){SKIPMODAL=true;try{render()}finally{SKIPMODAL=false}}
 function saveLocal(){try{localStorage.setItem(LS,JSON.stringify(S))}catch(e){}}
-function syncFail(e){SYNC.state='err';syncPill();try{console.warn('sync',e)}catch(x){}}
+function syncFail(e){SYNC.busy=false;SYNC.err=true;syncPill();try{console.warn('sync',e)}catch(x){}}
 function syncInit(){
   if(!syncAvail())return;
   try{
     firebase.initializeApp(window.FB_CONFIG);
-    var db=firebase.firestore();
-    SYNC.auth=firebase.auth();
-    SYNC.doc=db.collection('gac').doc('state');
-    SYNC.hist=db.collection('gacHistory');
-    SYNC.state='out';
+    SYNC.db=firebase.firestore();SYNC.auth=firebase.auth();
+    SYNC.doc=SYNC.db.collection('gac').doc('state');
+    SYNC.hist=SYNC.db.collection('gacHistory');
     SYNC.auth.onAuthStateChanged(function(u){
-      SYNC.user=u||null;
-      if(u){SYNC.state='busy';startListen()}else{stopListen();SYNC.state='out'}
-      syncPill();
+      SYNC.user=u||null;syncPill();
+      if(u&&S.dirty&&S.base!=null)scheduleSync(300);   /* chỉ gửi nếu có thay đổi chưa gửi, không đọc khi mở app */
     });
   }catch(e){syncFail(e)}
 }
-function stopListen(){if(SYNC.u1){SYNC.u1();SYNC.u1=null}if(SYNC.u2){SYNC.u2();SYNC.u2=null}}
-function startListen(){
-  stopListen();SYNC.first=true;SYNC.histFirst=true;SYNC.remoteHist={};
-  SYNC.u1=SYNC.doc.onSnapshot(function(snap){
-    var d=snap.exists?snap.data():null;
-    if(SYNC.first){
-      SYNC.first=false;
-      if(!d||(d.updated||0)<(S.updated||0)){S.updated=S.updated||Date.now();pushState()}
-      else{applyRemote(d);SYNC.state='ok'}
-    }else if(d&&d.by!==SYNC.dev&&(d.updated||0)>(S.updated||0)){applyRemote(d);SYNC.state='ok'}
-    else if(!snap.metadata.hasPendingWrites)SYNC.state='ok';
-    syncPill();
-  },syncFail);
-  SYNC.u2=SYNC.hist.onSnapshot(function(qs){
-    var ch=false;
-    qs.docChanges().forEach(function(c){
-      var iso=c.doc.id;
-      if(c.type==='removed'){delete S.history[iso];delete SYNC.remoteHist[iso];ch=true}
-      else{try{S.history[iso]=JSON.parse(c.doc.data().json);SYNC.remoteHist[iso]=1;ch=true}catch(e){}}
+function scheduleSync(ms){
+  if(!SYNC.user||SYNC.conf)return;
+  clearTimeout(SYNC.timer);SYNC.err=false;syncPill();
+  SYNC.timer=setTimeout(function(){pushState()},ms==null?700:ms);
+}
+function pushPayload(){var o=Object.assign({},S);delete o.history;delete o.dirty;delete o.base;return JSON.stringify(o)}
+function pushState(force){
+  if(!SYNC.user||!SYNC.doc||SYNC.busy)return;
+  var u=S.updated||Date.now(),json=pushPayload(),hist=Object.keys(S.history).sort(),base=S.base,found=null;
+  SYNC.busy=true;SYNC.err=false;syncPill();
+  SYNC.db.runTransaction(function(tx){
+    return tx.get(SYNC.doc).then(function(snap){
+      var r=snap.exists?snap.data():null;
+      if(!force&&r&&r.by!==SYNC.dev&&(r.updated||0)!==(base||0)){found=r;return}
+      tx.set(SYNC.doc,{json:json,updated:u,by:SYNC.dev,hist:hist});
     });
-    if(SYNC.histFirst){SYNC.histFirst=false;Object.keys(S.history).forEach(function(k){if(!SYNC.remoteHist[k])histSet(k)})}
-    if(ch){saveLocal();if(ui.tab==='history'||ui.modal&&ui.modal.type==='hday')rerender()}
+  }).then(function(){
+    SYNC.busy=false;
+    if(found){SYNC.conf=found;ui.modal={type:'conflict'};renderModal();syncPill();return}
+    S.base=u;if((S.updated||0)===u)S.dirty=false;saveLocal();syncPill();
+    if(S.dirty)scheduleSync(300);
   },syncFail);
 }
-function applyRemote(d){
-  var o;try{o=JSON.parse(d.json)}catch(e){return}
-  var h=S.history;S=o;S.history=h;normalize();S.updated=d.updated||0;
-  archivePast();saveLocal();ui.swap=null;rerender();
+function pullHist(list){
+  var want={};list.forEach(function(k){want[k]=1});
+  Object.keys(S.history).forEach(function(k){if(!want[k])delete S.history[k]});
+  return Promise.all(list.filter(function(k){return !S.history[k]}).map(function(k){
+    return SYNC.hist.doc(k).get().then(function(sn){if(sn.exists){try{S.history[k]=JSON.parse(sn.data().json)}catch(e){}}}).catch(function(){});
+  }));
 }
-function pushState(){
-  if(!SYNC.user||!SYNC.doc)return;
-  var o=Object.assign({},S);delete o.history;
-  SYNC.state='busy';syncPill();
-  SYNC.doc.set({json:JSON.stringify(o),updated:S.updated||Date.now(),by:SYNC.dev}).then(function(){SYNC.state='ok';syncPill()},syncFail);
+function pullAllHist(){
+  return SYNC.hist.get().then(function(qs){qs.forEach(function(d){try{S.history[d.id]=JSON.parse(d.data().json)}catch(e){}})}).catch(function(){});
 }
-function scheduleSync(){
-  if(!SYNC.user)return;
-  clearTimeout(SYNC.timer);SYNC.state='busy';syncPill();
-  SYNC.timer=setTimeout(pushState,700);
+function applyRemote(r){
+  var o;try{o=JSON.parse(r.json)}catch(e){toast('Dữ liệu trên máy chủ bị lỗi');return Promise.resolve()}
+  var h=S.history;S=o;S.history=h;normalize();S.updated=r.updated||0;S.base=r.updated||0;S.dirty=false;ui.swap=null;
+  return (Array.isArray(r.hist)?pullHist(r.hist):pullAllHist()).then(function(){
+    var an=archivePast();if(an)save();else saveLocal();
+    SYNC.conf=null;SYNC.busy=false;SYNC.err=false;ui.modal=null;render();
+  });
+}
+function pullLatest(){
+  if(!SYNC.user||SYNC.busy)return;
+  SYNC.busy=true;SYNC.err=false;syncPill();
+  SYNC.doc.get().then(function(snap){
+    SYNC.busy=false;
+    if(!snap.exists){S.dirty=true;toast('Máy chủ chưa có dữ liệu, đang gửi dữ liệu của máy này lên');pushState();return}
+    var r=snap.data(),same=(r.updated||0)===(S.base||0);
+    if(S.dirty){
+      if(r.by===SYNC.dev||same){pushState();toast('Đang gửi thay đổi lên máy chủ');return}
+      SYNC.conf=r;ui.modal={type:'conflict'};renderModal();syncPill();return;
+    }
+    if(same){syncPill();toast('Đã là bản mới nhất');return}
+    if(S.base==null&&!S.settings.sample){SYNC.conf=r;ui.modal={type:'conflict'};renderModal();syncPill();return}
+    SYNC.busy=true;syncPill();
+    applyRemote(r).then(function(){toast('Đã tải dữ liệu mới nhất')});
+  },syncFail);
 }
 function histSet(iso){if(!SYNC.user||!SYNC.hist||!S.history[iso])return;SYNC.hist.doc(iso).set({json:JSON.stringify(S.history[iso])}).catch(syncFail)}
 function histDel(iso){if(!SYNC.user||!SYNC.hist)return;SYNC.hist.doc(iso).delete().catch(syncFail)}
+function fmtTs(t){if(!t)return 'không rõ';var d=new Date(t);return pad(d.getHours())+':'+pad(d.getMinutes())+' '+pad(d.getDate())+'/'+pad(d.getMonth()+1)+'/'+d.getFullYear()}
+function conflictModal(){
+  var r=SYNC.conf||{};
+  return '<h2>Hai bản dữ liệu khác nhau</h2><p class="sub">Máy chủ đang có bản do thiết bị khác lưu lúc <b>'+fmtTs(r.updated)+'</b>, khác với bản trên máy này. Hãy chọn bản muốn giữ.</p>'+
+    '<div class="mlist"><div class="mi"><div class="l"><b>Dùng bản trên máy chủ</b><div class="meta">Tải bản mới về máy này, bỏ thay đổi chưa gửi.</div></div><div class="acts"><button class="btn sm" data-act="conf-remote">Dùng bản máy chủ</button></div></div>'+
+    '<div class="mi"><div class="l"><b>Giữ bản trên máy này</b><div class="meta">Ghi đè bản trên máy chủ bằng bản của máy này.</div></div><div class="acts"><button class="btn sm primary" data-act="conf-local">Giữ bản máy này</button></div></div></div>'+
+    '<div class="foot"><button class="btn" data-act="conf-later">Để sau</button></div>';
+}
 function syncModal(){
   var h='<h2>Đồng bộ dữ liệu</h2>';
   if(SYNC.user){
-    h+='<p class="sub">Đã đăng nhập: <b>'+esc(SYNC.user.email||'')+'</b>. Thay đổi tự gửi lên máy chủ và hiện ở các thiết bị khác đã đăng nhập cùng tài khoản.</p><p class="tm">Trạng thái: '+esc(syncLabel())+'</p>'+
-      '<div class="foot"><button class="btn danger" data-act="sync-out">Đăng xuất</button><button class="btn" data-act="sync-now">Đồng bộ lại ngay</button><button class="btn primary" data-act="mclose">Xong</button></div>';
+    h+='<p class="sub">Đã đăng nhập: <b>'+esc(SYNC.user.email||'')+'</b>. Khi mở ứng dụng, dữ liệu lấy từ máy này. Chỉ khi bạn thay đổi thì mới gửi lên máy chủ.</p>'+
+      '<p class="tm">Trạng thái: '+esc(syncLabel())+(S.base?' · lần gửi gần nhất '+fmtTs(S.base):'')+'</p>'+
+      '<div class="mlist"><div class="mi"><div class="l"><b>Tải dữ liệu mới nhất</b><div class="meta">Lấy thay đổi từ thiết bị khác về máy này.</div></div><div class="acts"><button class="btn sm primary" data-act="sync-pull">Tải về</button></div></div>'+
+      '<div class="mi"><div class="l"><b>Gửi lên ngay</b><div class="meta">Gửi dữ liệu của máy này lên máy chủ.</div></div><div class="acts"><button class="btn sm" data-act="sync-now">Gửi lên</button></div></div></div>'+
+      '<div class="foot"><button class="btn danger" data-act="sync-out">Đăng xuất</button><button class="btn primary" data-act="mclose">Xong</button></div>';
   }else{
     h+='<p class="sub">Đăng nhập bằng tài khoản chung của đơn vị để dùng chung một bảng gác trên điện thoại và máy tính.</p>'+
       '<div class="field"><label for="sy-em">Email</label><input type="email" id="sy-em" autocomplete="username" autocapitalize="none" spellcheck="false"></div>'+
@@ -1084,7 +1171,10 @@ function syncLogin(){
   var say=function(t){if(er){er.textContent=t;er.hidden=false}};
   if(!em||!pw){say('Hãy nhập email và mật khẩu');return}
   if(er)er.hidden=true;if(go)go.disabled=true;
-  SYNC.auth.signInWithEmailAndPassword(em,pw).then(function(){ui.modal=null;renderModal();toast('Đã đăng nhập, đang đồng bộ')},function(e){
+  SYNC.auth.signInWithEmailAndPassword(em,pw).then(function(){
+    SYNC.user=SYNC.auth.currentUser||SYNC.user;ui.modal=null;renderModal();syncPill();toast('Đã đăng nhập');
+    pullLatest();   /* đăng nhập là thao tác chủ động nên lấy bản mới nhất một lần */
+  },function(e){
     var c=(e&&e.code)||'';if(go)go.disabled=false;
     say(c==='auth/network-request-failed'?'Không có mạng, hãy thử lại':c==='auth/too-many-requests'?'Thử quá nhiều lần, hãy đợi vài phút':'Sai email hoặc mật khẩu');
   });
@@ -1184,7 +1274,7 @@ function act(a,el,e){
     case 'auto':
       if(!S.people.some(function(p){return p.active})){toast('Chưa có quân số để cắt gác');break}
       ui.modal={type:'auto'};renderModal();break;
-    case 'run-auto':{var n=autoAssign(d.mode);ui.modal=null;save();render();var m=A.total-A.filled;toast('Đã xếp '+n+' lượt gác'+(m?', còn thiếu '+m+' người':', bảng gác đã đủ'));break}
+    case 'run-auto':{if(S.settings.rotMode!=='balance'){['cs','q'].forEach(function(T){var se=$('au-'+T);if(se&&se.value)setRotStart(T,se.value)})}var n=autoAssign(d.mode);ui.modal=null;save();render();var m=A.total-A.filled;toast('Đã xếp '+n+' lượt gác'+(m?', còn thiếu '+m+' người':', bảng gác đã đủ'));break}
     case 'copy':{var list=ui.view==='week'?dates.map(function(x){return x.iso}):[dates[ui.day].iso];ui.modal={type:'text',text:rosterText(list)};renderModal();break}
     case 'do-copy':{var ta=$('f-text');ta.focus();ta.select();
       if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(ta.value).then(function(){toast('Đã sao chép')},function(){toast('Đã chọn văn bản, hãy sao chép thủ công')})}
@@ -1200,10 +1290,14 @@ function act(a,el,e){
       ui.modal=null;commit('Đã lưu');break}
     case 'now':ui.modal={type:'now'};renderModal();break;
     case 'install':if(PWA.ev){PWA.ev.prompt();PWA.ev.userChoice.then(function(){PWA.ev=null;rerender()},function(){})}break;
-    case 'sync':ui.modal={type:'sync'};renderModal();break;
+    case 'sync':ui.modal={type:SYNC.conf?'conflict':'sync'};renderModal();break;
     case 'sync-login':syncLogin();break;
     case 'sync-out':if(SYNC.auth)SYNC.auth.signOut();ui.modal=null;renderModal();toast('Đã đăng xuất, dữ liệu vẫn còn trên máy này');break;
-    case 'sync-now':S.updated=Date.now();saveLocal();pushState();toast('Đang đồng bộ');break;
+    case 'sync-now':if(SYNC.conf){ui.modal={type:'conflict'};renderModal();break}S.updated=Date.now();S.dirty=true;saveLocal();ui.modal=null;renderModal();pushState();break;
+    case 'sync-pull':ui.modal=null;renderModal();pullLatest();break;
+    case 'conf-remote':{var cr=SYNC.conf;if(cr){SYNC.busy=true;syncPill();applyRemote(cr).then(function(){toast('Đã dùng bản trên máy chủ')})}break}
+    case 'conf-local':SYNC.conf=null;ui.modal=null;renderModal();S.dirty=true;pushState(true);break;
+    case 'conf-later':ui.modal=null;renderModal();syncPill();break;
     case 'xlsx':exportXlsx(d.mode,d.id);break;
     case 'hview':ui.modal={type:'hday',id:d.id};renderModal();break;
     case 'ask-del-hday':openConfirm('Xoá lịch sử ngày '+dmy(d.id)+'?','Bảng gác ngày này sẽ bị xoá khỏi lịch sử.','del-hday',d.id,'Xoá');break;
@@ -1259,7 +1353,7 @@ function act(a,el,e){
       else if(w==='del-many'){var ids=Object.keys(ui.sel);ids.forEach(function(x){removePerson(x)});ui.sel={};ui.selMode=false;commit('Đã xoá '+ids.length+' người')}
       else if(w==='del-post'){S.posts=S.posts.filter(function(x){return x.id!==id});Object.keys(S.assign).forEach(function(k){if(k.split('|')[1]===id)delete S.assign[k]});commit('Đã xoá')}
       else if(w==='del-shift'){S.shifts=S.shifts.filter(function(x){return x.id!==id});Object.keys(S.assign).forEach(function(k){if(k.split('|')[2]===id)delete S.assign[k]});commit('Đã xoá')}
-      else if(w==='sample'){ui.swap=null;sample();render();toast('Đã nạp dữ liệu mẫu')}
+      else if(w==='sample'){ui.swap=null;sample();save();render();toast('Đã nạp dữ liệu mẫu')}
       else if(w==='wipe'){S.people=[];S.leaves=[];S.assign={};S.settings.sample=false;ui.swap=null;commit('Đã xoá')}
       break}
   }
@@ -1289,7 +1383,7 @@ document.addEventListener('change',function(e){
   var k=t.dataset.set;
   if(k==='unit')S.settings.unit=t.value.trim();
   else if(k==='qLimit'||k==='byOrder')S.settings[k]=t.checked;
-  else if(k==='qFrom'||k==='qTo')S.settings[k]=t.value;
+  else if(k==='qFrom'||k==='qTo'||k==='rotMode')S.settings[k]=t.value;
   else{var v=parseInt(t.value,10);if(isNaN(v))v=k==='minRest'?8:1;S.settings[k]=Math.max(k==='minRest'?0:1,Math.min(k==='minRest'?24:5,v))}
   commit('Đã lưu quy tắc');
 });
@@ -1319,13 +1413,13 @@ setInterval(function(){if(dates[0]&&dates[0].iso!==isoOf(new Date()))rollover();
 try{if(window.claude&&claude.use)claude.use('downloads').then(function(d){DL=d||null},function(){DL=null})}catch(e){}
 S=load();
 if(S&&S.settings&&S.settings.sample&&(!S.people.some(function(p){return p.type})||!S.posts.some(function(p){return 'qn' in p})))S=null;
-if(S){normalize();prune();save()}else{sample()}
+if(S){normalize();if(prune())save();else saveLocal()}else{sample()}
 ui.view=window.matchMedia&&window.matchMedia('(max-width:760px)').matches?'day':'week';
 render();
 if(window.addEventListener){
   window.addEventListener('beforeinstallprompt',function(e){e.preventDefault();PWA.ev=e;rerender()});
   window.addEventListener('appinstalled',function(){PWA.ev=null;rerender();toast('Đã cài ứng dụng')});
-  window.addEventListener('online',function(){if(SYNC.user)pushState()});
+  window.addEventListener('online',function(){if(SYNC.user&&S.dirty&&S.base!=null&&!SYNC.conf)pushState()});
 }
 syncInit();
 })();
